@@ -1,0 +1,16 @@
+[
+	{
+		"id": 20000001,
+		"branch": "after_intro",
+		"sequence": 1,
+		"label": "사람을 지키기 위한 신뢰의 검입니다.",
+		"nextScene": "path_trust"
+	},
+	{
+		"id": 20000002,
+		"branch": "after_intro",
+		"sequence": 2,
+		"label": "아직은 모릅니다. 다만 약함을 견딜 수 없습니다.",
+		"nextScene": "path_doubt"
+	}
+]
