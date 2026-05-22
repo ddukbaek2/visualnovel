@@ -6,10 +6,11 @@ import { Vector2 } from "../libs/vanilla.js/src/base/vector2.js";
 import { Color } from "../libs/vanilla.js/src/base/color.js";
 import { EngineConfiguration, Engine } from "../libs/vanilla.js/src/core/engine.js";
 import { Graphic } from "../libs/vanilla.js/src/core/graphic.js";
-import { JsonAsset } from "../libs/vanilla.js/src/resource/jsonasset.js";
+import { TextAsset } from "../libs/vanilla.js/src/resource/textasset.js";
 import { ViewScaleMode } from "../libs/vanilla.js/src/core/viewmanager.js";
 import { GameScene } from "../libs/vanilla.js/src/game/gamescene.js";
 import { AudioBeepPlayer } from "./base/audiobeepplayer.js";
+import { ScriptParser } from "./base/scriptparser.js";
 import { DialoguePartNode } from "./part/dialoguepartnode.js";
 import { ChoicePartNode } from "./part/choicepartnode.js";
 import { TitlePartNode } from "./part/titlepartnode.js";
@@ -26,18 +27,16 @@ const PartKey = System.Object.freeze({
 
 
 //==============================================================================
-// JSON 데이터 애셋 식별자.
+// 시나리오 스크립트 자산 경로.
 //==============================================================================
-const JsonId = System.Object.freeze({
-	dialogueTable: 1,
-	choiceTable: 2,
-});
+const SCENARIO_SCRIPT_PATH = "./assets/data/script/scenario.txt";
 
 
 //==============================================================================
 // 비주얼노벨 메인 씬.
 // - GameScene 을 상속해 로딩 화면 / DEVTools / 캔버스 배경 클리어 / viewSize 변화 자동 감지를
 //   기반에서 받는다.
+// - 시나리오는 단일 .txt 스크립트 (/명령어 내용 문법) 로 작성되며 ScriptParser 가 파싱.
 // - 파트 (타이틀 / 대사 / 선택지) 등록 및 활성 전환.
 // - 시나리오 라우팅:
 //   타이틀 → 대사(intro) → 선택지(after_intro) → 대사(path_trust|path_doubt) → 대사(epilogue) → 타이틀.
@@ -46,8 +45,7 @@ export class VisualNovelScene extends GameScene {
 	//==============================================================================
 	// 멤버 변수 목록.
 	//==============================================================================
-	/** @private @type { System.Map<number, JsonAsset> } */ #loadedJsonAssets;
-	/** @private @type { Array<{ id: number, path: string }> } */ #pendingJsonLoads;
+	/** @private @type { TextAsset | null } */ #scenarioTextAsset;
 	/** @private @type { TitlePartNode } */ #titlePart;
 	/** @private @type { DialoguePartNode } */ #dialoguePart;
 	/** @private @type { ChoicePartNode } */ #choicePart;
@@ -59,8 +57,7 @@ export class VisualNovelScene extends GameScene {
 	//==============================================================================
 	constructor() {
 		super();
-		this.#loadedJsonAssets = new System.Map();
-		this.#pendingJsonLoads = [];
+		this.#scenarioTextAsset = null;
 		this.#titlePart = new TitlePartNode();
 		this.#dialoguePart = new DialoguePartNode();
 		this.#choicePart = new ChoicePartNode();
@@ -82,12 +79,15 @@ export class VisualNovelScene extends GameScene {
 	async loadAssets() {
 		await super.loadAssets();
 
-		// 데이터 테이블 예약.
-		this.loadJsonAsset(JsonId.dialogueTable, "./assets/data/table/dialoguetable.json");
-		this.loadJsonAsset(JsonId.choiceTable, "./assets/data/table/choicetable.json");
-
-		// 예약된 모든 자산 순차 로드.
-		await this.loadAllAssets();
+		// 시나리오 스크립트 텍스트 로드.
+		const scenarioTextAsset = new TextAsset();
+		try {
+			await scenarioTextAsset.load(SCENARIO_SCRIPT_PATH);
+			this.#scenarioTextAsset = scenarioTextAsset;
+		}
+		catch (error) {
+			console.error("[VisualNovelScene] 시나리오 스크립트 로드 실패:", error);
+		}
 	}
 
 	//==============================================================================
@@ -128,14 +128,16 @@ export class VisualNovelScene extends GameScene {
 		dialoguePart.setAudioBeepPlayer(audioBeepPlayer);
 		choicePart.setAudioBeepPlayer(audioBeepPlayer);
 
-		// 데이터 테이블 주입.
-		const dialogueTableAsset = this.getLoadedJsonAsset(JsonId.dialogueTable);
-		if (dialogueTableAsset && System.Array.isArray(dialogueTableAsset.data)) {
-			dialoguePart.setDialogues(dialogueTableAsset.data);
+		// 스크립트 파싱 후 대사 / 선택지 주입.
+		const scenarioTextAsset = this.getScenarioTextAsset();
+		if (scenarioTextAsset && typeof scenarioTextAsset.text === "string" && scenarioTextAsset.text.length > 0) {
+			const scriptParser = new ScriptParser();
+			const parsedScenario = scriptParser.parse(scenarioTextAsset.text);
+			dialoguePart.setDialogues(parsedScenario.dialogueList);
+			choicePart.setChoices(parsedScenario.choiceList);
 		}
-		const choiceTableAsset = this.getLoadedJsonAsset(JsonId.choiceTable);
-		if (choiceTableAsset && System.Array.isArray(choiceTableAsset.data)) {
-			choicePart.setChoices(choiceTableAsset.data);
+		else {
+			console.warn("[VisualNovelScene] 시나리오 텍스트가 비어 있습니다.");
 		}
 
 		// 타이틀 시작 버튼 → 인트로 대사 파트로 전환.
@@ -271,48 +273,13 @@ export class VisualNovelScene extends GameScene {
 	}
 
 	//==============================================================================
-	// JSON 자산 예약.
+	// 시나리오 스크립트 텍스트 자산 반환.
 	//==============================================================================
 	/**
-	 * @param { number } jsonId
-	 * @param { string } assetPath
+	 * @returns { TextAsset | null }
 	 */
-	loadJsonAsset(jsonId, assetPath) {
-		let normalizedJsonId = jsonId;
-		if (typeof normalizedJsonId === "string") {
-			normalizedJsonId = System.Number.parseInt(normalizedJsonId);
-		}
-		this.#pendingJsonLoads.push({ id: normalizedJsonId, path: assetPath });
-	}
-
-	//==============================================================================
-	// 로드된 JSON 자산 반환.
-	//==============================================================================
-	/**
-	 * @param { number } jsonId
-	 * @returns { JsonAsset | undefined }
-	 */
-	getLoadedJsonAsset(jsonId) {
-		let normalizedJsonId = jsonId;
-		if (typeof normalizedJsonId === "string") {
-			normalizedJsonId = System.Number.parseInt(normalizedJsonId);
-		}
-		const loadedJsonAssets = this.#loadedJsonAssets;
-		const loadedJsonAsset = loadedJsonAssets.get(normalizedJsonId);
-		return loadedJsonAsset;
-	}
-
-	//==============================================================================
-	// 예약된 모든 자산을 순차적으로 로드.
-	//==============================================================================
-	async loadAllAssets() {
-		const pendingJsonLoads = this.#pendingJsonLoads;
-		for (const pendingJson of pendingJsonLoads) {
-			const jsonAsset = new JsonAsset();
-			await jsonAsset.load(pendingJson.path);
-			this.#loadedJsonAssets.set(pendingJson.id, jsonAsset);
-		}
-		this.#pendingJsonLoads = [];
+	getScenarioTextAsset() {
+		return this.#scenarioTextAsset;
 	}
 
 	//==============================================================================
